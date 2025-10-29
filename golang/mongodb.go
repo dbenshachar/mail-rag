@@ -26,10 +26,14 @@ func MongoClient(mongoURI string) (*mongo.Client, error) {
 	opts := options.Client().ApplyURI(mongoURI).SetServerAPIOptions(serverAPI)
 	client, err := mongo.Connect(opts)
 
+	if err != nil {
+		return nil, err
+	}
+
 	if err := client.Ping(context.TODO(), readpref.Primary()); err != nil {
 		return nil, err
 	}
-	return client, err
+	return client, nil
 }
 
 type Document struct {

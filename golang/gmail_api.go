@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,7 +20,7 @@ import (
 	"google.golang.org/api/option"
 )
 
-func openBrowser(url string) {
+func openBrowser(url string) error {
 	var cmd string
 	var args []string
 
@@ -37,9 +36,8 @@ func openBrowser(url string) {
 		args = []string{url}
 	}
 
-	if err := exec.Command(cmd, args...).Start(); err != nil {
-		log.Fatal("could not open browser")
-	}
+	err := exec.Command(cmd, args...).Start()
+	return err
 }
 
 func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.Token, error) {
@@ -82,21 +80,27 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(token)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><script>window.close();</script></body></html>`)
 		close(done)
 	})
 
 	listener, err := net.Listen("tcp", ":"+localhost)
 	if err != nil {
-		return nil, fmt.Errorf("failed to listen: %w", err)
+		return nil, err
 	}
+
+	err_ch := make(chan error, 1)
 
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Printf("server error: %v", err)
+			err_ch <- err
 		}
 	}()
+
+	if err_ch != nil {
+		return nil, <-err_ch
+	}
 
 	authURL := config.AuthCodeURL("state", oauth2.AccessTypeOffline)
 	openBrowser(authURL)
@@ -112,7 +116,7 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 	}
 
 	if tokenErr != nil {
-		return nil, fmt.Errorf("token exchange failed: %w", tokenErr)
+		return nil, tokenErr
 	}
 
 	return token, nil
@@ -174,6 +178,10 @@ type loopbackSource struct {
 	clientSecret string
 }
 
+func Make_Loopback_Source(token oauth2.Token, clientID, clientSecret string) loopbackSource {
+	return loopbackSource{token: token, clientID: clientID, clientSecret: clientSecret}
+}
+
 func LoopbackRefresh(src loopbackSource) (oauth2.Token, error) {
 	t, err := GetTokenViaLoopback(src.token, src.clientID, src.clientSecret)
 	src.token = t
@@ -197,6 +205,16 @@ type Date struct {
 	year  int
 	month int
 	day   int
+}
+
+func Make_Date(year, month, day uint) Date {
+	if day > 31 {
+		fmt.Printf("Date cannot be greater than 31 or less than 0")
+	}
+	if month > 12 {
+		fmt.Printf("Month cannot be greater than 12")
+	}
+	return Date{year: int(year), month: int(month), day: int(day)}
 }
 
 func (date *Date) ToString() string {

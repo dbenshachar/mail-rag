@@ -29,30 +29,30 @@ func GetEmbedding(ctx context.Context, baseURL, model, text string) ([]float32, 
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/embeddings", bytes.NewReader(b))
 	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("post to ollama: %w", err)
+		return nil, err
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, err
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama error: %s: %s", res.Status, string(body))
+		return nil, err
 	}
 
 	var resp struct {
 		Embedding []float32 `json:"embedding"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, err
 	}
 
 	return resp.Embedding, nil

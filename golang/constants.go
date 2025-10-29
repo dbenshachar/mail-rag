@@ -8,11 +8,9 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func LoadDotEnv() {
+func LoadDotEnv() error {
 	err := godotenv.Load(".env")
-	if err != nil {
-		log.Fatal(err)
-	}
+	return err
 }
 
 type Config struct {
@@ -21,7 +19,7 @@ type Config struct {
 	} `json:"api"`
 }
 
-func LoadJSON() Config {
+func LoadJSON() (Config, error) {
 	fileContent, err := os.ReadFile("constants.json")
 	if err != nil {
 		log.Fatal(err)
@@ -30,7 +28,7 @@ func LoadJSON() Config {
 	var config Config
 	err = json.Unmarshal(fileContent, &config)
 	if err != nil {
-		log.Fatal(err)
+		return config, err
 	}
-	return config
+	return config, nil
 }
