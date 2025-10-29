@@ -1,4 +1,4 @@
-package golang
+package mail
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +39,10 @@ func openBrowser(url string) error {
 
 	err := exec.Command(cmd, args...).Start()
 	return err
+}
+
+func LoadToken(api_config_path string) {
+
 }
 
 func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.Token, error) {
@@ -90,17 +95,11 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 		return nil, err
 	}
 
-	err_ch := make(chan error, 1)
-
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			err_ch <- err
+			log.Fatal(err)
 		}
 	}()
-
-	if err_ch != nil {
-		return nil, <-err_ch
-	}
 
 	authURL := config.AuthCodeURL("state", oauth2.AccessTypeOffline)
 	openBrowser(authURL)

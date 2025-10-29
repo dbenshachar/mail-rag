@@ -1,7 +1,8 @@
-package golang
+package mongo
 
 import (
 	"context"
+	"mail_rag/golang/ollama"
 	"os"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -13,7 +14,7 @@ func GetVector(message string) ([]float32, error) {
 	ctx := context.Background()
 	url := "http://localhost:" + os.Getenv("ollama_host")
 
-	vec, err := GetEmbedding(ctx,
+	vec, err := ollama.GetEmbedding(ctx,
 		url,
 		os.Getenv("ollama_model"),
 		message)

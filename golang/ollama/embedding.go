@@ -1,4 +1,4 @@
-package golang
+package ollama
 
 import (
 	"bytes"
@@ -20,41 +20,34 @@ func GetEmbedding(ctx context.Context, baseURL, model, text string) ([]float32, 
 		Model:  model,
 		Prompt: text,
 	}
-
 	b, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return nil, err
 	}
-
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/embeddings", bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
-
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
 	}
-
 	if res.StatusCode != http.StatusOK {
-		return nil, err
+		return nil, fmt.Errorf("status %d: %s", res.StatusCode, string(body))
 	}
-
 	var resp struct {
 		Embedding []float32 `json:"embedding"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
-
 	return resp.Embedding, nil
 }
 
