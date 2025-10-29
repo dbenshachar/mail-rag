@@ -5,15 +5,118 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"time"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 )
+
+func openBrowser(url string) {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
+	case "darwin":
+		cmd = "open"
+		args = []string{url}
+	default:
+		cmd = "xdg-open"
+		args = []string{url}
+	}
+
+	if err := exec.Command(cmd, args...).Start(); err != nil {
+		log.Fatal("could not open browser")
+	}
+}
+
+func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.Token, error) {
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  "http://localhost:" + localhost + "/auth/callback",
+		Scopes: []string{
+			gmail.GmailModifyScope,
+		},
+		Endpoint: google.Endpoint,
+	}
+
+	server := &http.Server{
+		Addr: ":" + localhost,
+	}
+
+	var token *oauth2.Token
+	var tokenErr error
+	done := make(chan struct{})
+
+	http.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			tokenErr = fmt.Errorf("missing code parameter")
+			http.Error(w, "missing code parameter", http.StatusBadRequest)
+			close(done)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var err error
+		token, err = config.Exchange(ctx, code)
+		if err != nil {
+			tokenErr = err
+			http.Error(w, "failed to exchange token", http.StatusInternalServerError)
+			close(done)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(token)
+		close(done)
+	})
+
+	listener, err := net.Listen("tcp", ":"+localhost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen: %w", err)
+	}
+
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Printf("server error: %v", err)
+		}
+	}()
+
+	authURL := config.AuthCodeURL("state", oauth2.AccessTypeOffline)
+	openBrowser(authURL)
+
+	select {
+	case <-done:
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	case <-time.After(30 * time.Second):
+		server.Shutdown(context.Background())
+		return nil, fmt.Errorf("timeout waiting for OAuth callback")
+	}
+
+	if tokenErr != nil {
+		return nil, fmt.Errorf("token exchange failed: %w", tokenErr)
+	}
+
+	return token, nil
+}
 
 type Mail struct {
 	ID       string
