@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -20,6 +23,39 @@ import (
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 )
+
+func LoadTokenCache() (*oauth2.Token, error) {
+	const filePath = ".data/token_cache.json"
+	if err := os.MkdirAll(".data", 0700); err != nil {
+		return nil, err
+	}
+
+	b, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, errors.New("token cache file is empty")
+	}
+
+	var tok oauth2.Token
+	if err := json.Unmarshal(b, &tok); err != nil {
+		return nil, fmt.Errorf("invalid token cache")
+	}
+
+	if strings.TrimSpace(tok.RefreshToken) == "" {
+		return nil, errors.New("no refresh token in cache")
+	}
+	return &tok, nil
+}
+
+func WriteTokenCache(token *oauth2.Token) error {
+	data, err := json.MarshalIndent(token, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(".data/token_cache.json", data, 0600)
+}
 
 func openBrowser(url string) error {
 	var cmd string
@@ -41,11 +77,15 @@ func openBrowser(url string) error {
 	return err
 }
 
-func LoadToken(api_config_path string) {
-
-}
-
 func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.Token, error) {
+	cached, err := LoadTokenCache()
+	if err == nil {
+		cached, err := GetTokenViaLoopback(*cached, clientID, clientSecret)
+		if err == nil {
+			return &cached, nil
+		}
+	}
+
 	config := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -88,6 +128,7 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<html><body><script>window.close();</script></body></html>`)
 		close(done)
+
 	})
 
 	listener, err := net.Listen("tcp", ":"+localhost)
@@ -118,7 +159,8 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 		return nil, tokenErr
 	}
 
-	return token, nil
+	err = WriteTokenCache(token)
+	return token, err
 }
 
 type Mail struct {
@@ -168,7 +210,9 @@ func GetTokenViaLoopback(token oauth2.Token, clientID string, clientSecret strin
 		return token, err
 	}
 
-	return token, nil
+	err = WriteTokenCache(&token)
+
+	return token, err
 }
 
 type loopbackSource struct {
