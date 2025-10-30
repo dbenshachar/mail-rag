@@ -2,4 +2,3 @@
 .data/
 go.mod
 go.sum
-api_cache.json
