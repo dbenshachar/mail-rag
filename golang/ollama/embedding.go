@@ -12,7 +12,9 @@ import (
 	"time"
 )
 
-func GetEmbedding(ctx context.Context, baseURL, model, text string) ([]float32, error) {
+func GetEmbedding(ctx context.Context, baseURL, model, text string, contextLength int) ([]float32, error) {
+	maxLen := min(contextLength/4, len(text))
+	text = text[:maxLen]
 	reqBody := struct {
 		Model  string `json:"model"`
 		Prompt string `json:"prompt"`
@@ -24,11 +26,13 @@ func GetEmbedding(ctx context.Context, baseURL, model, text string) ([]float32, 
 	if err != nil {
 		return nil, err
 	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/embeddings", bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
@@ -51,12 +55,12 @@ func GetEmbedding(ctx context.Context, baseURL, model, text string) ([]float32, 
 	return resp.Embedding, nil
 }
 
-func CosineSimilarity(a, b []float64) (float64, error) {
+func CosineSimilarity(a, b []float32) (float32, error) {
 	if len(a) != len(b) {
 		return 0, errors.New("vectors must be the same size")
 	}
 
-	var dotProduct, magA, magB float64
+	var dotProduct, magA, magB float32
 	for i := range a {
 		dotProduct += a[i] * b[i]
 		magA += a[i] * a[i]
@@ -67,5 +71,5 @@ func CosineSimilarity(a, b []float64) (float64, error) {
 		return 0, nil
 	}
 
-	return dotProduct / (math.Sqrt(magA) * math.Sqrt(magB)), nil
+	return dotProduct / (float32(math.Sqrt(float64(magA))) * float32(math.Sqrt(float64(magB)))), nil
 }

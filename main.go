@@ -1,12 +1,13 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"log"
 	"mail_rag/golang/env"
 	"mail_rag/golang/mail"
-	"mail_rag/golang/ollama"
+	"mail_rag/golang/mongodb"
 	"os"
+	"strconv"
 )
 
 func main() {
@@ -14,36 +15,36 @@ func main() {
 
 	clientID, clientSecret := os.Getenv("gmail_client_id"), os.Getenv("gmail_secret")
 
+	fmt.Println("Getting token...")
 	token, err := mail.GetInitialToken(clientID, clientSecret, os.Getenv("gmail_redirect"))
+	fmt.Println("Got token!")
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	fmt.Println("Making source...")
 	src := mail.Make_Loopback_Source(*token, clientID, clientSecret)
-	ctx := context.Background()
-	srv, err := mail.NewGmailService(ctx, src)
+	_, err = mail.LoopbackRefresh(src)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	date := mail.Make_Date(2025, 10, 28)
-
-	ids, err := mail.FetchIDs(srv, date)
+	fmt.Println("Made source!")
+	fmt.Println("Making client...")
+	client, err := mongodb.MongoClient(os.Getenv("mongo_uri"))
+	fmt.Println("Made client!")
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println("Getting emails...")
 
-	contents, err := mail.FetchMessages(srv, ids)
+	contextLength, err := strconv.Atoi((os.Getenv("ollama_context")))
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	log.Printf("Retrieved %d messages, first message length: %d", len(contents), len(contents[0]))
-
-	emb, err := ollama.GetEmbedding(ctx, "http://localhost:"+os.Getenv("ollama_host"), os.Getenv("ollama_model"), contents[0])
+	err = mongodb.UpdateMongo(client, src, os.Getenv("ollama_host"), os.Getenv("ollama_model"), contextLength)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	print(emb[0])
+	fmt.Println("Added emails to Mongo!")
 }

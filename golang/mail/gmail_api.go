@@ -29,7 +29,6 @@ func LoadTokenCache() (*oauth2.Token, error) {
 	if err := os.MkdirAll(".data", 0700); err != nil {
 		return nil, err
 	}
-
 	b, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -37,14 +36,15 @@ func LoadTokenCache() (*oauth2.Token, error) {
 	if len(bytes.TrimSpace(b)) == 0 {
 		return nil, errors.New("token cache file is empty")
 	}
-
 	var tok oauth2.Token
 	if err := json.Unmarshal(b, &tok); err != nil {
 		return nil, fmt.Errorf("invalid token cache")
 	}
-
 	if strings.TrimSpace(tok.RefreshToken) == "" {
 		return nil, errors.New("no refresh token in cache")
+	}
+	if tok.Expiry.Before(time.Now()) {
+		return nil, errors.New("token is expired")
 	}
 	return &tok, nil
 }
@@ -80,9 +80,9 @@ func openBrowser(url string) error {
 func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.Token, error) {
 	cached, err := LoadTokenCache()
 	if err == nil {
-		cached, err := GetTokenViaLoopback(*cached, clientID, clientSecret)
+		refreshed, err := GetTokenViaLoopback(*cached, clientID, clientSecret)
 		if err == nil {
-			return &cached, nil
+			return &refreshed, nil
 		}
 	}
 
@@ -128,7 +128,6 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<html><body><script>window.close();</script></body></html>`)
 		close(done)
-
 	})
 
 	listener, err := net.Listen("tcp", ":"+localhost)
@@ -207,6 +206,7 @@ func GetTokenViaLoopback(token oauth2.Token, clientID string, clientSecret strin
 
 	if expiresIn, ok := result["expires_in"].(float64); ok {
 		token.ExpiresIn = int64(expiresIn)
+		token.Expiry = time.Now().Add(time.Duration(expiresIn) * time.Second)
 		return token, err
 	}
 
@@ -215,39 +215,39 @@ func GetTokenViaLoopback(token oauth2.Token, clientID string, clientSecret strin
 	return token, err
 }
 
-type loopbackSource struct {
+type LoopbackSource struct {
 	token        oauth2.Token
 	clientID     string
 	clientSecret string
 }
 
-func Make_Loopback_Source(token oauth2.Token, clientID, clientSecret string) loopbackSource {
-	return loopbackSource{token: token, clientID: clientID, clientSecret: clientSecret}
+func Make_Loopback_Source(token oauth2.Token, clientID, clientSecret string) LoopbackSource {
+	return LoopbackSource{token: token, clientID: clientID, clientSecret: clientSecret}
 }
 
-func LoopbackRefresh(src loopbackSource) (oauth2.Token, error) {
+func LoopbackRefresh(src LoopbackSource) (oauth2.Token, error) {
 	t, err := GetTokenViaLoopback(src.token, src.clientID, src.clientSecret)
 	src.token = t
 	return src.token, err
 }
 
-func (src *loopbackSource) Token() (*oauth2.Token, error) {
+func (src *LoopbackSource) Token() (*oauth2.Token, error) {
 	token, err := GetTokenViaLoopback(src.token, src.clientID, src.clientSecret)
 	src.token = token
 	return &src.token, err
 }
 
-func NewGmailService(ctx context.Context, src loopbackSource) (*gmail.Service, error) {
+func NewGmailService(ctx context.Context, src LoopbackSource) (*gmail.Service, error) {
 	token, _ := LoopbackRefresh(src)
-	ts := &loopbackSource{token: token, clientID: src.clientID, clientSecret: src.clientSecret}
+	ts := &LoopbackSource{token: token, clientID: src.clientID, clientSecret: src.clientSecret}
 	srv, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	return srv, err
 }
 
 type Date struct {
-	year  int
-	month int
-	day   int
+	Year  int
+	Month int
+	Day   int
 }
 
 func Make_Date(year, month, day uint) Date {
@@ -257,11 +257,11 @@ func Make_Date(year, month, day uint) Date {
 	if month > 12 {
 		fmt.Printf("Month cannot be greater than 12")
 	}
-	return Date{year: int(year), month: int(month), day: int(day)}
+	return Date{Year: int(year), Month: int(month), Day: int(day)}
 }
 
 func (date *Date) ToString() string {
-	return strconv.Itoa(date.year) + "/" + strconv.Itoa(date.month) + "/" + strconv.Itoa(date.day)
+	return strconv.Itoa(date.Year) + "/" + strconv.Itoa(date.Month) + "/" + strconv.Itoa(date.Day)
 }
 
 func FetchIDs(srv *gmail.Service, date Date) ([]string, error) {
