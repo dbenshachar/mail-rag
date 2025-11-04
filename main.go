@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"mail_rag/golang/env"
@@ -47,4 +48,12 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println("Added emails to Mongo!")
+
+	query := "software intern jobs near bellevue"
+	ctx := context.Background()
+	res, err := mongodb.VectorSearch(ctx, client, "http://localhost:"+os.Getenv("ollama_host"), os.Getenv("ollama_model"), query, contextLength, 0.6)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(res[0])
 }
