@@ -4,56 +4,85 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"mail_rag/golang/api"
 	"mail_rag/golang/env"
 	"mail_rag/golang/mail"
 	"mail_rag/golang/mongodb"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
+
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
+type service struct {
+	client        *mongo.Client
+	source        mail.LoopbackSource
+	ollamaHost    string
+	ollamaModel   string
+	contextLength int
+}
+
 func main() {
-	env.LoadDotEnv()
+	if err := env.LoadDotEnv(); err != nil {
+		log.Fatal(err)
+	}
 
-	clientID, clientSecret := os.Getenv("gmail_client_id"), os.Getenv("gmail_secret")
+	clientID := strings.TrimSpace(os.Getenv("gmail_client_id"))
+	clientSecret := strings.TrimSpace(os.Getenv("gmail_secret"))
+	redirectPort := strings.TrimSpace(os.Getenv("gmail_redirect"))
+	mongoURI := strings.TrimSpace(os.Getenv("mongo_uri"))
+	ollamaHost := strings.TrimSpace(os.Getenv("ollama_host"))
+	ollamaModel := strings.TrimSpace(os.Getenv("ollama_model"))
+	contextLengthRaw := strings.TrimSpace(os.Getenv("ollama_context"))
+	frontendOrigin := strings.TrimSpace(os.Getenv("frontend_origin"))
+	apiPort := strings.TrimSpace(os.Getenv("api_port"))
 
-	fmt.Println("Getting token...")
-	token, err := mail.GetInitialToken(clientID, clientSecret, os.Getenv("gmail_redirect"))
-	fmt.Println("Got token!")
+	if apiPort == "" {
+		apiPort = "8080"
+	}
+
+	contextLength, err := strconv.Atoi(contextLengthRaw)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("Making source...")
-	src := mail.Make_Loopback_Source(*token, clientID, clientSecret)
-	_, err = mail.LoopbackRefresh(src)
+	mongoClient, err := mongodb.MongoClient(mongoURI)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println("Made source!")
-	fmt.Println("Making client...")
-	client, err := mongodb.MongoClient(os.Getenv("mongo_uri"))
-	fmt.Println("Made client!")
+	token, err := mail.GetInitialToken(clientID, clientSecret, redirectPort)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("Getting emails...")
 
-	contextLength, err := strconv.Atoi((os.Getenv("ollama_context")))
-	if err != nil {
-		log.Fatal(err)
+	source := mail.Make_Loopback_Source(*token, clientID, clientSecret)
+	svc := &service{
+		client:        mongoClient,
+		source:        source,
+		ollamaHost:    ollamaHost,
+		ollamaModel:   ollamaModel,
+		contextLength: contextLength,
 	}
-	err = mongodb.UpdateMongo(client, src, os.Getenv("ollama_host"), os.Getenv("ollama_model"), contextLength)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Added emails to Mongo!")
 
-	query := "software intern jobs near bellevue"
-	ctx := context.Background()
-	res, err := mongodb.VectorSearch(ctx, client, "http://localhost:"+os.Getenv("ollama_host"), os.Getenv("ollama_model"), query, contextLength, 0.6)
-	if err != nil {
+	httpServer := api.NewServer(svc, frontendOrigin)
+	addr := ":" + apiPort
+	fmt.Printf("API server running at http://localhost%s\n", addr)
+	if err := http.ListenAndServe(addr, httpServer.Handler()); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(res[0])
+}
+
+func (s *service) Sync(ctx context.Context) (int, error) {
+	return mongodb.UpdateMongo(ctx, s.client, s.source, s.ollamaHost, s.ollamaModel, s.contextLength)
+}
+
+func (s *service) ListEmails(ctx context.Context, limit, offset int) ([]mongodb.EmailSummary, int64, error) {
+	return mongodb.ListEmails(ctx, s.client, limit, offset)
+}
+
+func (s *service) Search(ctx context.Context, query string, limit int, threshold float32) ([]mongodb.SearchResult, error) {
+	return mongodb.VectorSearch(ctx, s.client, "http://localhost:"+s.ollamaHost, s.ollamaModel, query, s.contextLength, threshold, limit)
 }

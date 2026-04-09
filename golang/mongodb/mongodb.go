@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"mail_rag/golang/mail"
 	"mail_rag/golang/ollama"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -22,7 +23,6 @@ func MongoClient(mongoURI string) (*mongo.Client, error) {
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
 	opts := options.Client().ApplyURI(mongoURI).SetServerAPIOptions(serverAPI)
 	client, err := mongo.Connect(opts)
-
 	if err != nil {
 		return nil, err
 	}
@@ -37,23 +37,96 @@ type Document struct {
 	Contents  string    `bson:"contents"`
 	Embedding []float32 `bson:"embedding"`
 	EmailID   string    `bson:"email_id"`
+	Subject   string    `bson:"subject"`
+	From      string    `bson:"from"`
+	To        string    `bson:"to"`
+	Date      time.Time `bson:"date"`
+	Snippet   string    `bson:"snippet"`
+	UpdatedAt time.Time `bson:"updated_at"`
 }
 
-func InsertEmbedding(client *mongo.Client, embedding []float32, contents, id string) error {
+type EmailSummary struct {
+	EmailID string    `json:"email_id" bson:"email_id"`
+	Subject string    `json:"subject" bson:"subject"`
+	From    string    `json:"from" bson:"from"`
+	To      string    `json:"to" bson:"to"`
+	Date    time.Time `json:"date" bson:"date"`
+	Snippet string    `json:"snippet" bson:"snippet"`
+}
+
+type SearchResult struct {
+	Score float32      `json:"score"`
+	Email EmailSummary `json:"email"`
+}
+
+func BuildUpsertSpec(record mail.EmailRecord, embedding []float32, now time.Time) (bson.D, bson.D, *options.UpdateOneOptionsBuilder) {
+	filter := bson.D{{Key: "email_id", Value: record.EmailID}}
+	update := bson.D{{
+		Key: "$set",
+		Value: bson.D{
+			{Key: "email_id", Value: record.EmailID},
+			{Key: "subject", Value: record.Subject},
+			{Key: "from", Value: record.From},
+			{Key: "to", Value: record.To},
+			{Key: "date", Value: record.Date},
+			{Key: "snippet", Value: record.Snippet},
+			{Key: "contents", Value: record.Contents},
+			{Key: "embedding", Value: embedding},
+			{Key: "updated_at", Value: now},
+		},
+	}}
+	opts := options.UpdateOne().SetUpsert(true)
+	return filter, update, opts
+}
+
+func UpsertEmbedding(ctx context.Context, client *mongo.Client, record mail.EmailRecord, embedding []float32, now time.Time) error {
 	collection := client.Database("mail_rag").Collection("embeddings")
+	filter, update, opts := BuildUpsertSpec(record, embedding, now)
+	_, err := collection.UpdateOne(ctx, filter, update, opts)
+	return err
+}
 
-	doc := Document{
-		Contents:  contents,
-		Embedding: embedding,
-		EmailID:   id,
+func RankSearchResults(queryEmbedding []float32, docs []Document, threshold float32, limit int) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 20
 	}
-
-	_, err := collection.InsertOne(context.TODO(), doc)
-	if err != nil {
-		return err
+	results := make([]SearchResult, 0, len(docs))
+	for _, doc := range docs {
+		if len(doc.Embedding) != len(queryEmbedding) {
+			continue
+		}
+		score, err := ollama.CosineSimilarity(queryEmbedding, doc.Embedding)
+		if err != nil {
+			return nil, err
+		}
+		if score < threshold {
+			continue
+		}
+		results = append(results, SearchResult{
+			Score: score,
+			Email: EmailSummary{
+				EmailID: doc.EmailID,
+				Subject: doc.Subject,
+				From:    doc.From,
+				To:      doc.To,
+				Date:    doc.Date,
+				Snippet: doc.Snippet,
+			},
+		})
 	}
-
-	return nil
+	if len(results) == 0 {
+		return results, nil
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score == results[j].Score {
+			return results[i].Email.Date.After(results[j].Email.Date)
+		}
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
 }
 
 func VectorSearch(
@@ -62,7 +135,12 @@ func VectorSearch(
 	baseURL, model, query string,
 	contextLength int,
 	threshold float32,
-) ([]string, error) {
+	limit int,
+) ([]SearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []SearchResult{}, nil
+	}
 
 	embed, err := ollama.GetEmbedding(ctx, baseURL, model, query, contextLength)
 	if err != nil {
@@ -74,9 +152,15 @@ func VectorSearch(
 		ctx,
 		bson.D{},
 		options.Find().SetProjection(bson.M{
-			"contents":  1,
-			"embedding": 1,
-			"email_id":  1,
+			"contents":   1,
+			"embedding":  1,
+			"email_id":   1,
+			"subject":    1,
+			"from":       1,
+			"to":         1,
+			"date":       1,
+			"snippet":    1,
+			"updated_at": 1,
 		}),
 	)
 	if err != nil {
@@ -84,30 +168,67 @@ func VectorSearch(
 	}
 	defer cur.Close(ctx)
 
-	var out []string
+	docs := make([]Document, 0)
 	for cur.Next(ctx) {
 		var doc Document
 		if err := cur.Decode(&doc); err != nil {
 			return nil, err
 		}
-
-		if len(doc.Embedding) != len(embed) {
-			continue
-		}
-
-		score, err := ollama.CosineSimilarity(embed, doc.Embedding)
-		if err != nil {
-			return nil, err
-		}
-		if score >= threshold {
-			out = append(out, doc.Contents)
-		}
+		docs = append(docs, doc)
 	}
 	if err := cur.Err(); err != nil {
 		return nil, err
 	}
 
-	return out, nil
+	return RankSearchResults(embed, docs, threshold, limit)
+}
+
+func ListEmails(ctx context.Context, client *mongo.Client, limit, offset int) ([]EmailSummary, int64, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	col := client.Database("mail_rag").Collection("embeddings")
+	findOpts := options.Find().
+		SetProjection(bson.M{
+			"email_id": 1,
+			"subject":  1,
+			"from":     1,
+			"to":       1,
+			"date":     1,
+			"snippet":  1,
+		}).
+		SetSort(bson.D{{Key: "date", Value: -1}}).
+		SetLimit(int64(limit)).
+		SetSkip(int64(offset))
+
+	cur, err := col.Find(ctx, bson.D{}, findOpts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cur.Close(ctx)
+
+	emails := make([]EmailSummary, 0, limit)
+	for cur.Next(ctx) {
+		var item EmailSummary
+		if err := cur.Decode(&item); err != nil {
+			return nil, 0, err
+		}
+		emails = append(emails, item)
+	}
+	if err := cur.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	total, err := col.CountDocuments(ctx, bson.D{})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return emails, total, nil
 }
 
 func LoadDateCache() (mail.Date, error) {
@@ -161,46 +282,58 @@ func GetCurrentDate() mail.Date {
 	}
 }
 
-func UpdateMongo(client *mongo.Client, src mail.LoopbackSource, ollama_host, ollama_model string, contextLength int) error {
+func UpdateMongo(ctx context.Context, client *mongo.Client, src mail.LoopbackSource, ollamaHost, ollamaModel string, contextLength int) (int, error) {
 	_, err := mail.LoopbackRefresh(src)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	srv, err := mail.NewGmailService(ctx, src)
 	if err != nil {
-		log.Fatal(err)
+		return 0, err
 	}
 
 	date, err := LoadDateCache()
 	if err != nil {
-		log.Fatal(err)
+		date = mail.Date{Year: 2000, Month: 1, Day: 1}
 	}
 
 	ids, err := mail.FetchIDs(srv, date)
 	if err != nil {
-		log.Fatal(err)
+		return 0, err
 	}
 
-	contents, err := mail.FetchMessages(srv, ids)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for idx := range contents {
-		emb, err := ollama.GetEmbedding(ctx, "http://localhost:"+ollama_host, ollama_model, contents[idx], contextLength)
-		if err == nil {
-			err = InsertEmbedding(client, emb, contents[idx], ids[idx])
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
+	if len(ids) == 0 {
+		if err := WriteDateCache(GetCurrentDate()); err != nil {
+			return 0, err
 		}
+		return 0, nil
 	}
 
-	WriteDateCache(GetCurrentDate())
+	records, err := mail.FetchMessages(srv, ids)
+	if err != nil {
+		return 0, err
+	}
 
-	return err
+	now := time.Now().UTC()
+	syncedCount := 0
+	for _, record := range records {
+		emb, err := ollama.GetEmbedding(ctx, "http://localhost:"+ollamaHost, ollamaModel, record.Contents, contextLength)
+		if err != nil {
+			return syncedCount, err
+		}
+		if err := UpsertEmbedding(ctx, client, record, emb, now); err != nil {
+			return syncedCount, err
+		}
+		syncedCount++
+	}
+
+	if err := WriteDateCache(GetCurrentDate()); err != nil {
+		return syncedCount, err
+	}
+
+	return syncedCount, nil
 }

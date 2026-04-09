@@ -1,0 +1,179 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap");
+
+:root {
+  --sand: #f5efe6;
+  --paper: #fffaf1;
+  --ink: #1f2d24;
+  --accent: #d67b35;
+  --accent-deep: #9f4e12;
+  --line: rgba(31, 45, 36, 0.18);
+  --card: rgba(255, 250, 241, 0.8);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Space Grotesk", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 12% 18%, rgba(214, 123, 53, 0.26), transparent 38%),
+    radial-gradient(circle at 88% 10%, rgba(31, 45, 36, 0.14), transparent 42%),
+    linear-gradient(150deg, #f8f2e7 0%, #ece2d1 62%, #e8d6bf 100%);
+}
+
+main {
+  min-height: 100vh;
+}
+
+.inbox-wrap {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 3.5rem 1rem 2rem;
+  animation: rise 380ms ease-out;
+}
+
+.inbox-head {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.inbox-title {
+  margin: 0;
+  letter-spacing: 0.02em;
+  font-size: clamp(1.8rem, 3vw, 2.6rem);
+  font-weight: 700;
+}
+
+.inbox-subtitle {
+  margin: 0.25rem 0 0;
+  font-family: "IBM Plex Mono", monospace;
+  color: rgba(31, 45, 36, 0.75);
+  font-size: 0.9rem;
+}
+
+.controls {
+  margin-top: 1.2rem;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.65rem;
+}
+
+.search-input {
+  width: 100%;
+  padding: 0.82rem 1rem;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.95rem;
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--ink);
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--accent-deep);
+  box-shadow: 0 0 0 2px rgba(214, 123, 53, 0.25);
+}
+
+.sync-btn {
+  border: 0;
+  border-radius: 14px;
+  padding: 0.8rem 1rem;
+  min-width: 120px;
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 600;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  cursor: pointer;
+}
+
+.sync-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.meta-line {
+  margin: 0.9rem 0 0;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  color: rgba(31, 45, 36, 0.75);
+}
+
+.status {
+  margin-top: 1rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.88rem;
+}
+
+.status.error {
+  color: #7d1f1f;
+}
+
+.grid {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.card {
+  background: var(--card);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 1rem;
+  animation: appear 280ms ease-out;
+}
+
+.card-subject {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 600;
+}
+
+.card-meta {
+  margin: 0.45rem 0;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  color: rgba(31, 45, 36, 0.72);
+}
+
+.card-snippet {
+  margin: 0;
+  line-height: 1.45;
+  color: rgba(31, 45, 36, 0.9);
+}
+
+@keyframes appear {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 720px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+}

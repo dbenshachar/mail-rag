@@ -7,16 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
+	netmail "net/mail"
 	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -73,8 +75,7 @@ func openBrowser(url string) error {
 		args = []string{url}
 	}
 
-	err := exec.Command(cmd, args...).Start()
-	return err
+	return exec.Command(cmd, args...).Start()
 }
 
 func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.Token, error) {
@@ -96,20 +97,28 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 		Endpoint: google.Endpoint,
 	}
 
+	mux := http.NewServeMux()
 	server := &http.Server{
-		Addr: ":" + localhost,
+		Addr:    ":" + localhost,
+		Handler: mux,
 	}
 
 	var token *oauth2.Token
 	var tokenErr error
 	done := make(chan struct{})
+	var once sync.Once
+	closeDone := func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
 
-	http.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			tokenErr = fmt.Errorf("missing code parameter")
 			http.Error(w, "missing code parameter", http.StatusBadRequest)
-			close(done)
+			closeDone()
 			return
 		}
 
@@ -121,13 +130,13 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 		if err != nil {
 			tokenErr = err
 			http.Error(w, "failed to exchange token", http.StatusInternalServerError)
-			close(done)
+			closeDone()
 			return
 		}
 
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<html><body><script>window.close();</script></body></html>`)
-		close(done)
+		_, _ = fmt.Fprint(w, `<html><body><script>window.close();</script></body></html>`)
+		closeDone()
 	})
 
 	listener, err := net.Listen("tcp", ":"+localhost)
@@ -136,21 +145,25 @@ func GetInitialToken(clientID, clientSecret string, localhost string) (*oauth2.T
 	}
 
 	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
+		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			tokenErr = serveErr
+			closeDone()
 		}
 	}()
 
 	authURL := config.AuthCodeURL("state", oauth2.AccessTypeOffline)
-	openBrowser(authURL)
+	if err := openBrowser(authURL); err != nil {
+		_ = server.Shutdown(context.Background())
+		return nil, err
+	}
 
 	select {
 	case <-done:
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		server.Shutdown(ctx)
-	case <-time.After(30 * time.Second):
-		server.Shutdown(context.Background())
+		_ = server.Shutdown(ctx)
+	case <-time.After(2 * time.Minute):
+		_ = server.Shutdown(context.Background())
 		return nil, fmt.Errorf("timeout waiting for OAuth callback")
 	}
 
@@ -173,6 +186,16 @@ type Mail struct {
 	HTML     string
 }
 
+type EmailRecord struct {
+	EmailID  string
+	Subject  string
+	From     string
+	To       string
+	Date     time.Time
+	Snippet  string
+	Contents string
+}
+
 func GetTokenViaLoopback(token oauth2.Token, clientID string, clientSecret string) (oauth2.Token, error) {
 	if time.Now().Before(token.Expiry.Add(-time.Minute)) {
 		return token, nil
@@ -184,7 +207,6 @@ func GetTokenViaLoopback(token oauth2.Token, clientID string, clientSecret strin
 	data.Set("grant_type", "refresh_token")
 
 	resp, err := http.PostForm("https://oauth2.googleapis.com/token", data)
-
 	if err != nil {
 		return token, err
 	}
@@ -198,20 +220,20 @@ func GetTokenViaLoopback(token oauth2.Token, clientID string, clientSecret strin
 		return token, err
 	}
 
-	if accessToken, ok := result["access_token"].(string); ok {
-		token.AccessToken = accessToken
-	} else {
-		return token, err
+	accessToken, ok := result["access_token"].(string)
+	if !ok {
+		return token, errors.New("access_token missing in refresh response")
 	}
+	token.AccessToken = accessToken
 
-	if expiresIn, ok := result["expires_in"].(float64); ok {
-		token.ExpiresIn = int64(expiresIn)
-		token.Expiry = time.Now().Add(time.Duration(expiresIn) * time.Second)
-		return token, err
+	expiresIn, ok := result["expires_in"].(float64)
+	if !ok {
+		return token, errors.New("expires_in missing in refresh response")
 	}
+	token.ExpiresIn = int64(expiresIn)
+	token.Expiry = time.Now().Add(time.Duration(expiresIn) * time.Second)
 
 	err = WriteTokenCache(&token)
-
 	return token, err
 }
 
@@ -238,10 +260,12 @@ func (src *LoopbackSource) Token() (*oauth2.Token, error) {
 }
 
 func NewGmailService(ctx context.Context, src LoopbackSource) (*gmail.Service, error) {
-	token, _ := LoopbackRefresh(src)
+	token, err := LoopbackRefresh(src)
+	if err != nil {
+		return nil, err
+	}
 	ts := &LoopbackSource{token: token, clientID: src.clientID, clientSecret: src.clientSecret}
-	srv, err := gmail.NewService(ctx, option.WithTokenSource(ts))
-	return srv, err
+	return gmail.NewService(ctx, option.WithTokenSource(ts))
 }
 
 type Date struct {
@@ -288,42 +312,152 @@ func FetchIDs(srv *gmail.Service, date Date) ([]string, error) {
 	return ids, nil
 }
 
-func DecodeMessage(msg *gmail.Message) (string, error) {
-	var body string
-
-	if msg.Payload.Parts == nil {
-		body = msg.Payload.Body.Data
-	} else {
-		for _, part := range msg.Payload.Parts {
-			if part.MimeType == "text/plain" {
-				body = part.Body.Data
-				break
-			}
-		}
+func decodeBase64URL(data string) (string, error) {
+	if strings.TrimSpace(data) == "" {
+		return "", nil
 	}
-
-	decoded, err := base64.URLEncoding.DecodeString(body)
+	decoded, err := base64.RawURLEncoding.DecodeString(data)
+	if err == nil {
+		return string(decoded), nil
+	}
+	decoded, err = base64.URLEncoding.DecodeString(data)
 	if err != nil {
 		return "", err
 	}
-
 	return string(decoded), nil
 }
 
-func FetchMessages(srv *gmail.Service, ids []string) ([]string, error) {
-	var messages []string
+func decodePlainTextPart(part *gmail.MessagePart) (string, bool, error) {
+	if part == nil {
+		return "", false, nil
+	}
+
+	if part.MimeType == "text/plain" {
+		text, err := decodeBase64URL(part.Body.Data)
+		if err != nil {
+			return "", false, err
+		}
+		if strings.TrimSpace(text) != "" {
+			return text, true, nil
+		}
+	}
+
+	for _, child := range part.Parts {
+		text, ok, err := decodePlainTextPart(child)
+		if err != nil {
+			return "", false, err
+		}
+		if ok {
+			return text, true, nil
+		}
+	}
+
+	if part.Body != nil && strings.TrimSpace(part.Body.Data) != "" {
+		text, err := decodeBase64URL(part.Body.Data)
+		if err == nil && strings.TrimSpace(text) != "" {
+			return text, true, nil
+		}
+	}
+
+	return "", false, nil
+}
+
+func DecodeMessage(msg *gmail.Message) (string, error) {
+	if msg == nil || msg.Payload == nil {
+		return "", nil
+	}
+	text, ok, err := decodePlainTextPart(msg.Payload)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return text, nil
+	}
+	return "", nil
+}
+
+func headerValue(headers []*gmail.MessagePartHeader, name string) string {
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, name) {
+			return strings.TrimSpace(h.Value)
+		}
+	}
+	return ""
+}
+
+func truncateRunes(value string, max int) string {
+	trimmed := strings.TrimSpace(value)
+	if max <= 0 || len(trimmed) == 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(trimmed) <= max {
+		return trimmed
+	}
+	r := []rune(trimmed)
+	return strings.TrimSpace(string(r[:max]))
+}
+
+func ExtractEmailRecord(msg *gmail.Message) (EmailRecord, error) {
+	contents, err := DecodeMessage(msg)
+	if err != nil {
+		return EmailRecord{}, err
+	}
+	if msg == nil {
+		return EmailRecord{}, nil
+	}
+
+	headers := []*gmail.MessagePartHeader{}
+	if msg.Payload != nil {
+		headers = msg.Payload.Headers
+	}
+	subject := headerValue(headers, "Subject")
+	from := headerValue(headers, "From")
+	to := headerValue(headers, "To")
+
+	date := time.Time{}
+	dateHeader := headerValue(headers, "Date")
+	if strings.TrimSpace(dateHeader) != "" {
+		if parsedDate, parseErr := netmail.ParseDate(dateHeader); parseErr == nil {
+			date = parsedDate
+		}
+	}
+	if date.IsZero() && msg.InternalDate > 0 {
+		date = time.UnixMilli(msg.InternalDate)
+	}
+	if date.IsZero() {
+		date = time.Now().UTC()
+	}
+
+	snippet := strings.TrimSpace(msg.Snippet)
+	if snippet == "" {
+		snippet = truncateRunes(contents, 180)
+	}
+
+	return EmailRecord{
+		EmailID:  msg.Id,
+		Subject:  subject,
+		From:     from,
+		To:       to,
+		Date:     date,
+		Snippet:  snippet,
+		Contents: contents,
+	}, nil
+}
+
+func FetchMessages(srv *gmail.Service, ids []string) ([]EmailRecord, error) {
+	messages := make([]EmailRecord, 0, len(ids))
 
 	for _, id := range ids {
-		msg, err := srv.Users.Messages.Get("me", id).Do()
+		msg, err := srv.Users.Messages.Get("me", id).Format("full").Do()
 		if err != nil {
 			return nil, err
 		}
 
-		content, err := DecodeMessage(msg)
+		record, err := ExtractEmailRecord(msg)
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, content)
+		messages = append(messages, record)
 	}
 
 	return messages, nil
